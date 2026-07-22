@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 export interface Session {
   /** Proxy-minted id, presented to the client as Mcp-Session-Id. */
   id: string;
+  /** Which configured upstream this session is bound to (its `id`). */
+  upstreamId: string;
   /** Upstream-issued Mcp-Session-Id (live mode), once known. */
   upstreamSessionId?: string;
   createdAt: number;
@@ -22,9 +24,10 @@ export interface Session {
 export class SessionManager {
   private sessions = new Map<string, Session>();
 
-  create(): Session {
+  create(upstreamId: string): Session {
     const s: Session = {
       id: randomUUID(),
+      upstreamId,
       createdAt: Date.now(),
       lastSeenAt: Date.now(),
       toolCallCounts: new Map(),
