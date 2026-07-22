@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcp-stage.dev/schemas/stage-definition.v1.schema.json",
+  "title": "mcp-stage stage definition (v1)",
+  "description": "One declarative document = a whole stage: upstreams, fixtures, scenario overlays, assertions, seed, clock, ttl. YAML or JSON on disk; this schema validates the parsed object. Structurally multi-upstream (PRD §12.3): `upstreams` is an array and every tool reference is upstream-qualified. The v1 runtime rejects >1 upstream at load time — the FORMAT does not.",
+  "type": "object",
+  "required": ["version", "name", "upstreams"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "description": { "type": "string" },
+    "seed": {
+      "type": "integer",
+      "default": 0,
+      "description": "Seeds the deterministic ID generators and any future stochastic behavior. Same definition + same seed = identical world, identical generated entity IDs across runs (PRD §12.5)."
+    },
+    "ttl": {
+      "type": "string",
+      "pattern": "^[0-9]+(s|m|h|d)$",
+      "description": "Auto-cleanup horizon for API-created stages, e.g. '2h'. Ignored for CLI-run stages."
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Virtual clock (PRD §12.1). Relative timestamps in fixtures ('-2d', '+3h') resolve against `start` at seed time. Each session gets its own clock instance; stage_advance_time / the control API move it.",
+      "properties": {
+        "start": {
+          "type": "string",
+          "default": "now",
+          "description": "'now' or an ISO 8601 datetime. 'now' is captured once at session creation, then the clock is virtual."
+        }
+      }
+    },
+    "upstreams": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/upstream" }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "overrides": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/override" }
+        }
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assertion" }
+    }
+  },
+  "$defs": {
+    "toolRef": {
+      "type": "string",
+      "pattern": "^([a-z0-9][a-z0-9_-]*:)?[A-Za-z0-9_.-]+$",
+      "description": "Upstream-qualified tool name: '<upstream_id>:<tool>', e.g. 'linear:create_issue'. The upstream prefix is optional while exactly one upstream exists, but the qualified form is always valid — definitions written today survive multi-upstream."
+    },
+    "upstream": {
+      "type": "object",
+      "required": ["id", "url", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+        "url": { "type": "string", "format": "uri" },
+        "mode": {
+          "enum": ["live", "replay", "fork"],
+          "description": "LIVE = passthrough (+ optional record). STAGED = replay or fork (PRD §12: two modes; replay/fork are the two STAGED backends)."
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "OAuth/bearer passthrough config (PRD §12.8). 'passthrough' forwards the client's Authorization header untouched. 'static' injects a token from env — for CI where the harness holds credentials.",
+          "properties": {
+            "strategy": { "enum": ["passthrough", "static", "none"], "default": "passthrough" },
+            "token_env": { "type": "string", "description": "Env var name when strategy=static. Never a literal token in the definition." }
+          }
+        },
+        "record": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Only meaningful when mode=live.",
+          "properties": {
+            "cassette": { "type": "string", "description": "Output path for the JSONL cassette." }
+          }
+        },
+        "replay": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Required when mode=replay (enforced at load).",
+          "properties": {
+            "cassette": { "type": "string" },
+            "match": { "enum": ["exact", "tool_args"], "default": "tool_args", "description": "exact = full params deep-equal in recorded order. tool_args = tool name + normalized args, order-free." },
+            "unmatched": { "enum": ["error", "passthrough"], "default": "error" }
+          }
+        },
+        "fork": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Required when mode=fork (enforced at load).",
+          "properties": {
+            "mapping": { "type": "string", "description": "Path to the tool-semantics mapping file (reads/writes/entity keys) for this upstream." },
+            "fixtures": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Fixture files (YAML/JSON) seeding the shadow store. Applied in order; later files may reference entities from earlier ones."
+            },
+            "unmapped_tool": {
+              "enum": ["error", "empty"],
+              "default": "error",
+              "description": "Behavior when the agent calls a tool the mapping doesn't declare. Never passthrough — fork must not touch production."
+            }
+          }
+        }
+      }
+    },
+    "override": {
+      "type": "object",
+      "required": ["tool", "behavior"],
+      "additionalProperties": false,
+      "description": "Scenario overlay applied before mode handling — works on LIVE and STAGED alike (PRD §12: cross-cutting).",
+      "properties": {
+        "tool": { "$ref": "#/$defs/toolRef" },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "args": { "type": "object", "description": "Partial deep match against tool arguments. Present keys must match; absent keys are ignored." },
+            "calls": {
+              "type": "string",
+              "pattern": "^(\\*|[0-9]+|[0-9]+\\.\\.([0-9]+)?)$",
+              "default": "*",
+              "description": "Which invocations of this tool (1-based, counted per session): '3' (only the 3rd), '3..' (3rd onward), '1..2', '*' (all)."
+            }
+          }
+        },
+        "behavior": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "const": "error" },
+                "code": { "type": "integer", "default": -32000 },
+                "message": { "type": "string", "default": "Injected error (mcp-stage scenario)" }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": { "kind": { "const": "empty" } },
+              "description": "Tool-shaped empty success: empty content/results per the tool's output shape."
+            },
+            {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "const": "malformed" },
+                "payload": { "description": "Served verbatim as the result. Default: a structurally plausible but schema-violating body." }
+              }
+            }
+          ]
+        },
+        "delay_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Latency injection. Composable: set delay_ms with any behavior, or alone with no `behavior` sibling — hence behavior is required only when delay_ms is absent (enforced at load, not in-schema, to keep this readable)."
+        }
+      }
+    },
+    "assertion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "tool"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "called" },
+            "tool": { "$ref": "#/$defs/toolRef" },
+            "min": { "type": "integer", "minimum": 1, "default": 1 },
+            "args": { "type": "object", "description": "At least `min` calls must partially match these args." }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "tool"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "never_called" },
+            "tool": { "$ref": "#/$defs/toolRef" },
+            "args": { "type": "object", "description": "If set, only calls matching these args violate the assertion." }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "tool", "limit"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "max_calls" },
+            "tool": { "$ref": "#/$defs/toolRef" },
+            "limit": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "before", "after"],
+          "additionalProperties": false,
+          "description": "Every call to `after` must be preceded by at least one call to `before` in the same session. Property-shaped on purpose — asserts an ordering constraint, not an exact sequence (PRD §12.6 honesty clause).",
+          "properties": {
+            "type": { "const": "ordering" },
+            "before": { "$ref": "#/$defs/toolRef" },
+            "after": { "$ref": "#/$defs/toolRef" }
+          }
+        }
+      ]
+    }
+  }
+}
