@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcp-stage.dev/schemas/cassette.v1.schema.json",
+  "title": "mcp-stage cassette entry (v1)",
+  "description": "A cassette is a .jsonl file. Each line is one entry validating against this schema. Line 1 MUST be a `meta` entry. Request/response pairs are stored as a single `exchange` entry (joined by the recorder) so replay matching never has to re-correlate JSON-RPC ids. Unpaired messages (notifications, cancelled requests) get their own entry types.",
+  "oneOf": [
+    { "$ref": "#/$defs/meta" },
+    { "$ref": "#/$defs/exchange" },
+    { "$ref": "#/$defs/notification" },
+    { "$ref": "#/$defs/orphan" }
+  ],
+  "$defs": {
+    "meta": {
+      "type": "object",
+      "required": ["type", "v", "created_at", "upstream", "recorder"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "meta" },
+        "v": { "const": 1 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "upstream": {
+          "type": "object",
+          "required": ["id", "url"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "description": "Stable upstream id; matches `upstreams[].id` in a stage definition so one cassette is portable across stage configs." },
+            "url": { "type": "string", "format": "uri" }
+          }
+        },
+        "protocol_version": { "type": "string", "description": "MCP protocol version negotiated at initialize." },
+        "client_info": { "type": "object", "description": "clientInfo from initialize params, verbatim." },
+        "server_info": { "type": "object", "description": "serverInfo from initialize result, verbatim." },
+        "capabilities": { "type": "object", "description": "Server capabilities from initialize result, verbatim. Replay serves these instead of a live handshake." },
+        "recorder": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "const": "mcp-stage" },
+            "version": { "type": "string" }
+          }
+        },
+        "redacted": { "type": "boolean", "default": false, "description": "True if a redaction pass has run (v1.x feature; field reserved now)." },
+        "correlation": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional fleet-scale correlation metadata for indexing/searching across many cassettes (interop-friendly with Agent VCR's session/endpoint/agent tagging). Never used by replay matching or fork seeding.",
+          "properties": {
+            "agent_id": { "type": "string", "description": "Identity of the agent that drove this session." },
+            "endpoint_id": { "type": "string", "description": "Logical endpoint/deployment this cassette was recorded against (distinct from upstream.url, which may be shared)." },
+            "run_id": { "type": "string", "description": "Eval/CI run identifier for correlating N parallel cassettes from one run." },
+            "labels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Free-form key/value tags."
+            }
+          }
+        }
+      }
+    },
+    "exchange": {
+      "type": "object",
+      "required": ["type", "seq", "session_id", "ts", "method", "request", "response", "latency_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "exchange" },
+        "seq": { "type": "integer", "minimum": 1, "description": "Monotonic per-cassette ordinal. Replay's `call #N` addressing and scenario `calls` matchers use this ordering." },
+        "session_id": { "type": "string", "description": "mcp-stage session id (not the transport's Mcp-Session-Id, which is recorded under transport)." },
+        "ts": { "type": "string", "format": "date-time", "description": "Wall-clock time the request was received by the proxy." },
+        "method": { "type": "string", "description": "JSON-RPC method, e.g. tools/call, tools/list, initialize." },
+        "tool": { "type": "string", "description": "Denormalized tool name when method is tools/call. Present so matchers and humans can grep without parsing params." },
+        "request": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "type": ["string", "integer"] },
+            "params": {}
+          }
+        },
+        "response": {
+          "type": "object",
+          "description": "Exactly one of result or error.",
+          "oneOf": [
+            { "required": ["result"], "properties": { "result": {} }, "not": { "required": ["error"] } },
+            { "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"] } }, "not": { "required": ["result"] } }
+          ]
+        },
+        "latency_ms": { "type": "number", "minimum": 0 },
+        "transport": {
+          "type": "object",
+          "description": "Transport-level detail useful for debugging; never used for matching.",
+          "properties": {
+            "mcp_session_id": { "type": "string" },
+            "status": { "type": "integer" },
+            "sse": { "type": "boolean", "description": "True if the response arrived over an SSE stream rather than a plain JSON body." }
+          }
+        }
+      }
+    },
+    "notification": {
+      "type": "object",
+      "required": ["type", "seq", "session_id", "ts", "direction", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "notification" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "session_id": { "type": "string" },
+        "ts": { "type": "string", "format": "date-time" },
+        "direction": { "enum": ["client_to_server", "server_to_client"] },
+        "method": { "type": "string" },
+        "params": {}
+      }
+    },
+    "orphan": {
+      "type": "object",
+      "description": "A request that never received a response before the session ended (timeout, cancellation, disconnect). Recorded for honesty; replay policy for orphans is defined by the stage, not the cassette.",
+      "required": ["type", "seq", "session_id", "ts", "method", "request", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "orphan" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "session_id": { "type": "string" },
+        "ts": { "type": "string", "format": "date-time" },
+        "method": { "type": "string" },
+        "tool": { "type": "string" },
+        "request": { "type": "object", "required": ["id"] },
+        "reason": { "enum": ["timeout", "cancelled", "disconnect", "shutdown"] }
+      }
+    }
+  }
+}
