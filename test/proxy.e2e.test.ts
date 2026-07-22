@@ -85,7 +85,7 @@ describe("proxy e2e (LIVE + record)", () => {
     tap.addOutput(cassettePath);
     proxy = createProxyServer({
       stage: { name: "test", upstreams: [{ id: "fake", url: upstream.url, auth: { strategy: "passthrough" } }] },
-      tap,
+      taps: new Map([["fake", tap]]),
     });
     await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
     const addr = proxy.address() as { port: number };

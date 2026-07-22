@@ -13,16 +13,42 @@ mcp-stage serve --upstream https://your-gateway.example/mcp \
 ```
 
 Every upstream is mounted at its **own address** — `/u/<id>/mcp` — so each one gets a
-distinct OAuth discovery namespace (see below). Run several at once:
+distinct OAuth discovery namespace (see below). Run several at once, each with its
+own auth strategy and its own cassette:
 
 ```bash
 mcp-stage serve \
-  --server linear=https://mcp.linear.app/mcp \
-  --server github=https://api.githubcopilot.com/mcp
-# clients: http://localhost:8848/u/linear/mcp , http://localhost:8848/u/github/mcp
+  --server 'linear=https://mcp.linear.app/mcp' \
+  --server 'github=https://api.githubcopilot.com/mcp' \
+  --server 'ci=https://internal.example/mcp;auth=static;token-env=CI_TOKEN;oauth=off' \
+  --record-dir ./cassettes
+# clients: http://localhost:8848/u/linear/mcp , …/u/github/mcp , …/u/ci/mcp
+# cassettes: ./cassettes/linear.cassette.jsonl , github.cassette.jsonl , ci.cassette.jsonl
 ```
 
-Every JSON-RPC exchange is logged as structured JSONL (the tap). Recording is the same stream written to a cassette — see `schemas/cassette.v1.schema.json`, the format's public contract.
+### Per-upstream configuration
+
+Each `--server` is `<id>=<url>` plus optional `;`-separated attributes:
+
+| attribute | meaning |
+|---|---|
+| `auth=passthrough\|static\|none` | auth strategy for this upstream (overrides `--auth`) |
+| `token-env=NAME` | env var holding the token, for `auth=static` |
+| `oauth=on\|off` | force OAuth discovery proxying on/off for this upstream |
+| `record=PATH` | cassette path for this upstream |
+| `log=PATH` | tap-log path for this upstream |
+
+Global flags set defaults for every upstream: `--auth`, `--token-env`, `--no-oauth`,
+`--record-dir <dir>` (records each upstream to `<dir>/<id>.cassette.jsonl`), and
+`--log-dir <dir>` (default `.stage`, tap logs at `<dir>/<id>.tap.jsonl`). The
+single-file `--record`/`--log` flags are single-upstream only.
+
+### Recording
+
+Every JSON-RPC exchange is logged as structured JSONL (the tap). Recording is the same
+stream written to a cassette — see `schemas/cassette.v1.schema.json`, the format's public
+contract. **Each upstream records to its own file**, whose `meta` names that upstream, so
+a multi-server run yields one clean cassette per server.
 
 Cassettes are **redacted by construction**: auth headers, bearer/JWT-shaped strings, and sensitive keys are scrubbed before anything hits disk. Safe to commit.
 
@@ -35,6 +61,8 @@ mcp-stage guarantees **environment** determinism, not **agent** determinism. The
 - `--auth passthrough` (default): the client's `Authorization` header is forwarded untouched, and the proxy **proxies OAuth discovery** so a client that only knows the proxy can complete the OAuth 2.1 flow against the upstream's real authorization server (see below).
 - `--auth static --token-env NAME`: the proxy injects a token from the environment — for CI, where the harness holds credentials and agents get none. Discovery proxying is off (the client never authenticates).
 - `--no-oauth`: disable discovery proxying even under passthrough (pure header forwarding, the v1 behavior).
+
+These are **defaults**; any upstream can override them with `auth=`, `token-env=`, and `oauth=` on its `--server` spec, so a single proxy can front an OAuth upstream and a `static`-token CI upstream at once.
 
 ### OAuth discovery proxying
 

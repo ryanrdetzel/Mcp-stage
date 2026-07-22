@@ -8,10 +8,10 @@ Current status: PR1 — a LIVE passthrough proxy with recording. Replay, fork, s
 
 ## Architecture
 
-- `src/cli/` — `mcp-stage` CLI (commander). The `serve` command runs the proxy.
+- `src/cli/` — `mcp-stage` CLI (commander). The `serve` command runs the proxy; `spec.ts` parses per-upstream `--server <id=url;attrs>` specs.
 - `src/transport/` — HTTP proxy server and SSE stream handling between client, proxy, and upstream. `router.ts` maps each upstream to its own address (`/u/<id>/mcp`); `oauth.ts` proxies OAuth 2.1 discovery (relays per-upstream protected-resource metadata and rewrites the upstream's 401 challenge to point at the proxy).
 - `src/core/` — session tracking and shared types (`StageConfig`, etc.). Sessions are bound to the upstream they were initialized against.
-- `src/log/` — the tap: every JSON-RPC exchange is written as structured JSONL. Recording a cassette is the same stream written to a second file. `redact.ts` scrubs auth headers, bearer/JWT-shaped strings, and sensitive keys before anything hits disk — cassettes are redacted by construction.
+- `src/log/` — the tap: every JSON-RPC exchange is written as structured JSONL. Each upstream has its own `Tap` (its own log + optional cassette, with `meta` naming that upstream); the proxy resolves the tap by the session's upstream id. Recording a cassette is the same stream written to a second file. `redact.ts` scrubs auth headers, bearer/JWT-shaped strings, and sensitive keys before anything hits disk — cassettes are redacted by construction.
 - `schemas/` — JSON Schemas for the cassette and stage-definition formats; these are public contracts.
 - `test/` — vitest unit tests plus an end-to-end proxy test.
 

@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createProxyServer } from "../src/transport/httpServer.js";
 import { Tap } from "../src/log/tap.js";
 import { randomUUID } from "node:crypto";
@@ -48,12 +51,21 @@ describe("oauth discovery proxying (per-upstream addresses)", () => {
   let b: Awaited<ReturnType<typeof startOauthUpstream>>;
   let proxy: Server;
   let base: string;
-  let tap: Tap;
+  let linearTap: Tap;
+  let githubTap: Tap;
+  let linearCassette: string;
+  let githubCassette: string;
 
   beforeAll(async () => {
     a = await startOauthUpstream();
     b = await startOauthUpstream();
-    tap = new Tap({ upstream: { id: "linear", url: a.url }, recorderVersion: "test" });
+    const dir = mkdtempSync(join(tmpdir(), "mcp-stage-oauth-"));
+    linearCassette = join(dir, "linear.cassette.jsonl");
+    githubCassette = join(dir, "github.cassette.jsonl");
+    linearTap = new Tap({ upstream: { id: "linear", url: a.url }, recorderVersion: "test" });
+    githubTap = new Tap({ upstream: { id: "github", url: b.url }, recorderVersion: "test" });
+    linearTap.addOutput(linearCassette);
+    githubTap.addOutput(githubCassette);
     proxy = createProxyServer({
       stage: {
         name: "test",
@@ -62,7 +74,7 @@ describe("oauth discovery proxying (per-upstream addresses)", () => {
           { id: "github", url: b.url, auth: { strategy: "passthrough" } },
         ],
       },
-      tap,
+      taps: new Map([["linear", linearTap], ["github", githubTap]]),
     });
     await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
     const addr = proxy.address() as { port: number };
@@ -70,7 +82,8 @@ describe("oauth discovery proxying (per-upstream addresses)", () => {
   });
 
   afterAll(async () => {
-    await tap.close();
+    await linearTap.close();
+    await githubTap.close();
     proxy.close();
     a.server.close();
     b.server.close();
@@ -121,4 +134,40 @@ describe("oauth discovery proxying (per-upstream addresses)", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("records each upstream to its own cassette, no cross-contamination", async () => {
+    // Drive one authenticated exchange per upstream.
+    await fetch(`${base}/u/linear/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "initialize", params: {} }),
+    });
+    await fetch(`${base}/u/github/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "initialize", params: {} }),
+    });
+    await linearTap.close();
+    await githubTap.close();
+
+    const linear = readCassette(linearCassette);
+    const github = readCassette(githubCassette);
+
+    // Each cassette's meta names its own upstream.
+    expect(linear[0].type).toBe("meta");
+    expect(linear[0].upstream.id).toBe("linear");
+    expect(linear[0].upstream.url).toBe(a.url);
+    expect(github[0].upstream.id).toBe("github");
+    expect(github[0].upstream.url).toBe(b.url);
+
+    // Each recorded its own initialize and nothing from the other server.
+    expect(linear.some((l) => l.type === "exchange" && l.method === "initialize")).toBe(true);
+    expect(github.some((l) => l.type === "exchange" && l.method === "initialize")).toBe(true);
+    expect(readFileSync(linearCassette, "utf8")).not.toContain(b.url);
+    expect(readFileSync(githubCassette, "utf8")).not.toContain(a.url);
+  });
 });
+
+function readCassette(path: string): any[] {
+  return readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+}

@@ -31,13 +31,15 @@ const MAX_JSON_BODY = 8 * 1024 * 1024; // buffered-JSON cap; SSE bodies stream a
 
 export interface ProxyServerOptions {
   stage: StageConfig;
-  tap: Tap;
+  /** One tap per upstream id — each records to its own file(s). Optional per id. */
+  taps?: Map<string, Tap>;
   sessions?: SessionManager;
 }
 
 export function createProxyServer(opts: ProxyServerOptions): Server {
   const sessions = opts.sessions ?? new SessionManager();
-  const { stage, tap } = opts;
+  const { stage } = opts;
+  const taps = opts.taps ?? new Map<string, Tap>();
 
   const upstreams = new Map<string, UpstreamConfig>();
   for (const u of stage.upstreams) upstreams.set(u.id, u);
@@ -118,15 +120,16 @@ export function createProxyServer(opts: ProxyServerOptions): Server {
       session = sessions.create(upstream.id);
     }
     const s = session;
+    const tap = taps.get(upstream.id);
 
     // Tap: log requests/notifications now; responses are logged when upstream answers.
     for (const m of messages) {
       if (isRequest(m)) {
         const tool = m.method === "tools/call" ? toolName(m.params) : undefined;
         if (tool) sessions.bumpToolCall(s, tool);
-        tap.onRequest({ seq: sessions.seq(s), sessionId: s.id, method: m.method, tool, rpcId: m.id, params: m.params });
+        tap?.onRequest({ seq: sessions.seq(s), sessionId: s.id, method: m.method, tool, rpcId: m.id, params: m.params });
       } else if (isNotification(m)) {
-        tap.onNotification({ seq: sessions.seq(s), sessionId: s.id, direction: "client_to_server", method: m.method, params: m.params });
+        tap?.onNotification({ seq: sessions.seq(s), sessionId: s.id, direction: "client_to_server", method: m.method, params: m.params });
       }
     }
 
@@ -158,7 +161,7 @@ export function createProxyServer(opts: ProxyServerOptions): Server {
         if (done) break;
         res.write(value);
         for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
-          tapSseData(s, ev.data, response.status);
+          tapSseData(tap, s, ev.data, response.status);
         }
       }
       res.end();
@@ -167,7 +170,7 @@ export function createProxyServer(opts: ProxyServerOptions): Server {
       if (buf.length > 0 && contentType.includes("json")) {
         try {
           const parsed = JSON.parse(buf.toString("utf8"));
-          for (const m of Array.isArray(parsed) ? parsed : [parsed]) tapUpstreamMessage(s, m, response.status, false);
+          for (const m of Array.isArray(parsed) ? parsed : [parsed]) tapUpstreamMessage(tap, s, m, response.status, false);
         } catch { /* non-JSON despite header: forward anyway, tap nothing */ }
       }
       res.writeHead(response.status, outHeaders);
@@ -179,6 +182,7 @@ export function createProxyServer(opts: ProxyServerOptions): Server {
     // Server-initiated SSE stream: forward to upstream, tee for the tap.
     const session = sessions.get(header(req, "mcp-session-id"));
     if (!session || session.upstreamId !== upstream.id) { res.writeHead(404).end(); return; }
+    const tap = taps.get(upstream.id);
     const upstreamHeaders = buildUpstreamHeaders(req.headers, upstream, session);
     upstreamHeaders.set("accept", "text/event-stream");
     const { response } = await forwardToUpstream(upstream, "GET", upstreamHeaders);
@@ -202,7 +206,7 @@ export function createProxyServer(opts: ProxyServerOptions): Server {
       if (done) break;
       res.write(value);
       for (const ev of parser.feed(decoder.decode(value, { stream: true }))) {
-        tapSseData(session, ev.data, 200);
+        tapSseData(tap, session, ev.data, 200);
       }
     }
     res.end();
@@ -215,26 +219,26 @@ export function createProxyServer(opts: ProxyServerOptions): Server {
       const upstreamHeaders = buildUpstreamHeaders(req.headers, upstream, session);
       await forwardToUpstream(upstream, "DELETE", upstreamHeaders);
     } catch { /* upstream may not support DELETE; terminate locally regardless */ }
-    tap.flushOrphans("disconnect", session.id);
+    taps.get(upstream.id)?.flushOrphans("disconnect", session.id);
     sessions.delete(session.id);
     res.writeHead(204).end();
   }
 
-  function tapSseData(session: Session, data: string, status: number): void {
+  function tapSseData(tap: Tap | undefined, session: Session, data: string, status: number): void {
     try {
       const m = JSON.parse(data) as JsonRpcMessage;
-      tapUpstreamMessage(session, m, status, true);
+      tapUpstreamMessage(tap, session, m, status, true);
     } catch { /* non-JSON SSE data: ignore for tap */ }
   }
 
-  function tapUpstreamMessage(session: Session, m: JsonRpcMessage, status: number, sse: boolean): void {
+  function tapUpstreamMessage(tap: Tap | undefined, session: Session, m: JsonRpcMessage, status: number, sse: boolean): void {
     if (isResponse(m)) {
-      tap.onResponse({
+      tap?.onResponse({
         sessionId: session.id, rpcId: m.id, result: m.result, error: m.error,
         transport: { mcp_session_id: session.upstreamSessionId, status, sse },
       });
     } else if (isNotification(m)) {
-      tap.onNotification({
+      tap?.onNotification({
         seq: sessions.seq(session), sessionId: session.id,
         direction: "server_to_client", method: m.method, params: m.params,
       });
